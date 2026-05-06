@@ -1,7 +1,7 @@
 # ginteff
 
 <!-- badges: start -->
-[![R-CMD-check](https://img.shields.io/badge/R%20CMD%20check-passing-brightgreen)](https://github.com/jespernwulff/ginteff)
+[![R-CMD-check](https://github.com/jespernwulff/ginteff/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/jespernwulff/ginteff/actions/workflows/R-CMD-check.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 <!-- badges: end -->
 
