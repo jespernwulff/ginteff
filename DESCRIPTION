@@ -1,0 +1,41 @@
+Package: ginteff
+Type: Package
+Title: Two- and Three-Way Interaction Effects (R Port of Stata's ginteff)
+Version: 0.1.0
+Authors@R: c(
+    person("Jesper", "Wulff", role = c("aut", "cre"),
+           email = "jwulff@econ.au.dk"),
+    person("Marius", "Radean", role = "aut",
+           comment = "Author of the original Stata 'ginteff' command (Stata Journal 23(2), 2023)"))
+Description: Computes two- and three-way interaction effects -- via partial
+    derivatives or first differences -- for fitted regression models, with
+    delta-method standard errors. R port of the 'ginteff' Stata command
+    (Radean, Stata Journal 23(2), 2023). Built as a thin wrapper around
+    the 'marginaleffects' package: a 2^k counterfactual hypercube of
+    interacted-variable vertices is built, average predictions per vertex
+    are obtained from 'marginaleffects::avg_predictions()', and a signed
+    linear combination is then formed manually using the per-vertex
+    variance-covariance so that arbitrary 'vcov =' specifications (e.g.
+    HC3, cluster, sandwich matrices) propagate through to the final
+    interaction-effect standard error.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: false
+RoxygenNote: 7.3.2
+Roxygen: list(markdown = TRUE)
+Imports:
+    marginaleffects (>= 0.21.0),
+    stats
+Suggests:
+    ggplot2,
+    knitr,
+    MASS,
+    nnet,
+    rmarkdown,
+    sandwich,
+    testthat (>= 3.0.0)
+URL: https://github.com/jespernwulff/ginteff,
+    https://doi.org/10.1177/1536867X231175253
+BugReports: https://github.com/jespernwulff/ginteff/issues
+VignetteBuilder: knitr
+Config/testthat/edition: 3

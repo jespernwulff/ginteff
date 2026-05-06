@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.github$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^.*\.tar\.gz$
+^.*\.Rcheck$
+^\.gitignore$
+^\.git$
+^cran-comments\.md$

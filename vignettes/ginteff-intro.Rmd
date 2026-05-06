@@ -1,0 +1,192 @@
+---
+title: "Introduction to ginteff"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to ginteff}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+    collapse = TRUE,
+    comment  = "#>",
+    fig.width = 6, fig.height = 4
+)
+```
+
+## What this package computes
+
+In a model with one or more interactions, the *interaction effect* on
+the response scale is rarely the same thing as the interaction *coefficient*.
+Once you go through a non-linear link, the relevant quantity for inference
+is the cross-partial of the predicted response. **ginteff** computes
+that quantity -- for two- and three-way interactions, on the response
+scale -- and gives delta-method standard errors that respect any
+variance-covariance specification you pass through.
+
+Two paths are available:
+
+* `dydxs`     — the cross-partial derivative
+                $\partial^k\,\mathrm{E}[y\mid x]/\partial x_1\cdots\partial x_k$,
+                approximated numerically.
+* `firstdiff` — the discrete cross-difference,
+                $\Delta^k\,\mathrm{E}[y\mid x]/\Delta x_1\cdots\Delta x_k$,
+                where each $\Delta x_j$ is a user-specified unit increase.
+
+The package wraps `marginaleffects::avg_predictions()` to do the heavy
+lifting, then assembles the signed linear combination by hand so that
+arbitrary `vcov =` arguments (`"HC3"`, `~cluster`, sandwich matrices)
+propagate cleanly to the final SE.
+
+## Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+library(ginteff)
+
+dat <- read.csv(system.file("extdata", "simdata.csv", package = "ginteff"))
+
+dat$female_f <- factor(dat$female, levels = c(0L, 1L),
+                       labels = c("male", "female"))
+dat$race_f   <- factor(dat$race,   levels = 1:3,
+                       labels = c("white", "black", "other"))
+dat$health_o <- ordered(dat$health, levels = 1:5)
+
+nrow(dat); mean(dat$health_2l)
+```
+
+## Example 1 -- two factors
+
+The Stata help opens with the discrete change of `female` × `race`
+on the probability of poor health, holding the other covariates at
+observed values. Here is the same call in R.
+
+```{r ex1}
+m1 <- glm(health_2l ~ female_f * race_f + age + height + weight,
+          data = dat, family = binomial)
+
+g1 <- ginteff(m1, dydxs = c("female_f", "race_f"), level = 0.90)
+g1
+```
+
+The factor `race_f` has three levels (`white`, `black`, `other`) so
+ginteff emits one row per non-base level. The numbers above match
+Stata's `ginteff, dydxs(female race) level(90)` to all printed digits.
+
+## Example 2 -- three continuous variables, partial derivative
+
+```{r ex2}
+m2 <- glm(health_2l ~ age * height * weight + female_f + race_f,
+          data = dat, family = binomial)
+
+ginteff(m2, dydxs = c("age", "height", "weight"))
+```
+
+## Example 3 -- the same effect via first difference
+
+```{r ex3}
+ginteff(m2, firstdiff = c("age", "height", "weight"),
+        nunit = c(age = 1, height = 1, weight = 1))
+```
+
+The point estimate matches Example 2 (the partial derivative is the
+limit of the first difference as the unit shrinks); the SE is slightly
+different because the FD is an exact linear combination of predictions
+while `dydxs` involves a numerical derivative. For three-way effects,
+`firstdiff` gives the most accurate SE; see `?ginteff` for the
+recommended default.
+
+## Example 4 -- ordered logit
+
+```{r ex4, eval = requireNamespace("MASS", quietly = TRUE)}
+m4 <- MASS::polr(health_o ~ age * female_f, data = dat, Hess = TRUE)
+
+ginteff(m4, dydxs = c("age", "female_f"),
+        atdxs = list(age = "mean"),
+        eqn   = 2L)            # outcome category 2
+```
+
+The `eqn` argument selects which outcome category's predicted
+probability we are differentiating; for `polr` it can be a label
+(`"2"`) or an integer position (`2L`).
+
+## Robust standard errors
+
+`vcov` is forwarded straight to `marginaleffects::avg_predictions()`,
+so anything that package accepts works:
+
+```{r robust, eval = requireNamespace("sandwich", quietly = TRUE)}
+ginteff(m2, dydxs = c("age", "height", "weight"), vcov = "HC3")
+```
+
+Cluster-robust SEs:
+
+```{r cluster, eval = FALSE}
+ginteff(m2, dydxs = c("age", "height", "weight"), vcov = ~race)
+```
+
+A pre-computed vcov matrix:
+
+```{r matvcov, eval = requireNamespace("sandwich", quietly = TRUE)}
+V <- sandwich::vcovCL(m2, cluster = ~race)
+ginteff(m2, dydxs = c("age", "height", "weight"), vcov = V)
+```
+
+## Per-observation effects
+
+`obseff = TRUE` keeps the per-observation interaction effect (point
+estimates only) so you can plot the heterogeneity behind the AIE:
+
+```{r obseff}
+g <- ginteff(m1, dydxs = c("female_f", "race_f"), obseff = TRUE,
+             level = 0.90)
+str(g$obseff)
+```
+
+If `ggplot2` is installed, `ginteffplot()` (or `plot()`) renders the
+AIE on a horizontal axis with a capped-spike CI and (optionally) a
+thin strip of the per-observation effects below -- the same layout as
+Stata's `ginteffplot`:
+
+```{r plot, eval = requireNamespace("ggplot2", quietly = TRUE)}
+ginteffplot(g, output = 1L, obseff = TRUE)
+```
+
+To see the per-observation effects against a covariate (an R extension,
+not in Stata's `ginteffplot`), pass `against = ` and the data:
+
+```{r plot_against, eval = requireNamespace("ggplot2", quietly = TRUE)}
+ginteffplot(g, output = 1L, obseff = TRUE,
+            against = "age", data = dat)
+```
+
+## Tidy output for downstream use
+
+```{r tidy}
+as.data.frame(ginteff(m2, firstdiff = c("age", "height", "weight"),
+                      nunit = c(age = 1, height = 1, weight = 1)))
+```
+
+## When to prefer `firstdiff` vs `dydxs`
+
+* **two-way interactions**: either path is fine; the SEs match.
+* **three-way interactions on a non-linear link**: prefer
+  `firstdiff`. The numerical cross-partial in `dydxs` involves the
+  finite-difference quotient `(2h)^{-3}`, which amplifies any noise in
+  `marginaleffects`'s internally-computed prediction Jacobian; in
+  testing the resulting SE comes out ~10 % lower than Stata's analytic
+  computation. The `firstdiff` SE is exact regardless of `h`.
+
+## Argument map vs Stata
+
+| Stata                  | R                                                |
+|------------------------|--------------------------------------------------|
+| `dydxs(x1 x2)`         | `dydxs = c("x1", "x2")`                          |
+| `firstdiff(x1 x2)`     | `firstdiff = c("x1", "x2")`                      |
+| `nunit((1) x1 x2)`     | `nunit = c(x1 = 1, x2 = 1)`                      |
+| `at((mean) x3)`        | `at = list(x3 = "mean")`                         |
+| `atdxs((mean) x1)`     | `atdxs = list(x1 = "mean")`                      |
+| `obseff(stub)`         | `obseff = TRUE`                                  |
+| `level(95)`            | `level = 0.95`                                   |
+| `intequation(#1)`      | `eqn = "outcome_label"` or integer index         |
+| `vce(unconditional)`   | `vcov = ~cluster` / `"HC3"` etc.                 |
