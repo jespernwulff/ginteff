@@ -166,3 +166,45 @@ test_that("inline factor() / poly() in formula doesn't break ginteff()", {
     expect_equal(dim(g_obs$obseff), c(n, 1L))
     expect_equal(mean(g_obs$obseff[, 1]), unname(g_obs$aie), tolerance = 1e-8)
 })
+
+# T10: panel data with NA-dropped rows + inline factor() in the formula.
+# Regression test for the v0.1.1 follow-up:  glm() applied na.action
+# silently dropped first-period-per-panel rows (where the lagged predictor
+# is NA), so xlev was incomplete for the dropped rows' factor levels.
+# Before the fix, .ginteff_get_data() returned the full raw frame and
+# the analytic engine then tripped on
+#   "factor factor(year) has new levels 1900".
+# After the fix, the same na.action filter is applied to the raw data
+# so the AIE is computed over exactly the rows the model was fit on
+# (and ginteff()'s reported N matches glm's nobs()).
+test_that("inline factor() + NA-dropped rows: ginteff respects na.action", {
+    set.seed(42)
+    n_per <- 30; n_grp <- 10
+    df <- expand.grid(year = 1900:(1900 + n_per - 1), id = 1:n_grp)
+    df$x  <- rnorm(nrow(df))
+    df$z  <- rnorm(nrow(df))
+    df$y  <- rbinom(nrow(df), 1, 0.3)
+    df    <- df[order(df$id, df$year), ]
+    df$x_lag <- ave(df$x, df$id, FUN = function(v) c(NA, head(v, -1)))
+
+    m <- glm(y ~ x_lag * z + factor(year),
+             family = binomial(link = "probit"), data = df)
+    ## Sanity: glm dropped 10 rows (year=1900, x_lag is NA), and 1900
+    ## is missing from xlev as a result.
+    expect_true(length(stats::na.action(m)) == 10L)
+    expect_false("1900" %in% m$xlevels[["factor(year)"]])
+
+    g <- ginteff(m, dydxs = c("x_lag", "z"))
+    expect_true(is.finite(unname(g$aie)))
+    expect_true(is.finite(unname(g$se)))
+    ## ginteff's N should equal glm's surviving-sample size, not nrow(df).
+    expect_equal(g$n, stats::nobs(m))
+
+    ## Should equal the result on the pre-filtered data.
+    df_clean <- df[!is.na(df$x_lag), ]
+    m_clean  <- glm(y ~ x_lag * z + factor(year),
+                    family = binomial(link = "probit"), data = df_clean)
+    g_clean  <- ginteff(m_clean, dydxs = c("x_lag", "z"))
+    expect_equal(unname(g$aie), unname(g_clean$aie), tolerance = 1e-10)
+    expect_equal(unname(g$se),  unname(g_clean$se),  tolerance = 1e-10)
+})

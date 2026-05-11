@@ -1,3 +1,20 @@
+# ginteff 0.1.2
+
+## Bug fixes
+
+* `ginteff()` now applies the model's `na.action` to the raw fitting
+  frame before computing interaction effects. Previously, after the
+  v0.1.1 fix made `.ginteff_get_data()` return the raw frame, models
+  whose fit had silently dropped rows (e.g. panel data with a lagged
+  predictor that's `NA` in the first period per panel) errored with
+  `factor <X> has new levels <Y>`. The dropped rows held factor
+  levels that never made it into `xlev`, and `model.frame(...,
+  xlev = xlev)` then refused to coerce them. The fix subsets the
+  raw frame by `na.action(model)` so the AIE is computed over
+  exactly the rows that contributed to the fit (and `g$n` matches
+  `nobs(model)`). Reported by the same external user as the v0.1.1
+  bug; new regression test T10. (#2)
+
 # ginteff 0.1.1
 
 ## Bug fixes

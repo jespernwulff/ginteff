@@ -736,17 +736,41 @@ ginteff <- function(model,
 
 .ginteff_get_data <- function(model) {
 
+    raw <- NULL
+
     ## (1) Some fitters store the raw frame on the object.
     d <- model$data
     if (!is.null(d) && is.data.frame(d) && nrow(d) > 0L)
-        return(as.data.frame(d))
+        raw <- as.data.frame(d)
 
     ## (2) Re-evaluate the original `data =` argument.
-    d <- tryCatch(eval(stats::getCall(model)$data,
-                       envir = environment(stats::formula(model))),
-                  error = function(e) NULL)
-    if (!is.null(d) && is.data.frame(d) && nrow(d) > 0L)
-        return(as.data.frame(d))
+    if (is.null(raw)) {
+        d <- tryCatch(eval(stats::getCall(model)$data,
+                           envir = environment(stats::formula(model))),
+                      error = function(e) NULL)
+        if (!is.null(d) && is.data.frame(d) && nrow(d) > 0L)
+            raw <- as.data.frame(d)
+    }
+
+    if (!is.null(raw)) {
+        ## Apply the same na.action that lm/glm/polr/multinom did
+        ## during fitting.  Otherwise rows the model never saw stay
+        ## in the frame and (a) `model.matrix(..., xlev = xlev)` errors
+        ## with "factor X has new levels Y" if the dropped rows held
+        ## levels that didn't survive into `xlev`, and (b) the AIE is
+        ## averaged over a different sample than the fit.  Common
+        ## trigger: panel data with lagged predictors -- the first
+        ## period per panel has NA on the lag, glm drops those rows,
+        ## but the corresponding factor(year) levels never make it
+        ## into `xlev`.
+        omit <- stats::na.action(model)
+        if (!is.null(omit)) {
+            idx <- as.integer(omit)
+            if (length(idx) && all(idx >= 1L & idx <= nrow(raw)))
+                raw <- raw[-idx, , drop = FALSE]
+        }
+        return(raw)
+    }
 
     ## (3) Last resort: post-transformation model frame.  This will not
     ## carry raw columns through inline transforms, so users with
