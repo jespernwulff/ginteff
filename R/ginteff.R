@@ -712,18 +712,53 @@ ginteff <- function(model,
 
 # =====================================================================
 # Internal: data extraction
+#
+# Prefer the *raw* fitting data (with untransformed columns) over
+# `model.frame(model)` (which contains post-transformation columns named
+# after the formula expression, e.g. `factor(group)` instead of `group`).
+# Using the raw frame matters whenever the user's formula contains an
+# inline transform -- factor(), poly(), I(x^2), bs(), ns(), scale(),
+# log(), etc. With a post-transformation frame, downstream `predict()`
+# calls re-evaluate `predvars` against our counterfactual newdata and
+# fail with `object '<raw_var>' not found`, and any user reference to
+# `<raw_var>` in `dydxs`/`firstdiff` also breaks because the column has
+# been renamed.
+#
+# Resolution order:
+#   1. `model$data` -- some fitters (lme4, glmmTMB, ...) cache the raw
+#      fitting frame here.
+#   2. Re-evaluate the `data =` argument from `model$call` in the
+#      formula's environment -- works for lm/glm/polr/multinom/svyglm
+#      whenever the original data frame is still in scope.
+#   3. Fall back to `model.frame(model)` -- post-transformation frame
+#      that works only for plain (no inline transform) formulas.
 # =====================================================================
 
 .ginteff_get_data <- function(model) {
+
+    ## (1) Some fitters store the raw frame on the object.
+    d <- model$data
+    if (!is.null(d) && is.data.frame(d) && nrow(d) > 0L)
+        return(as.data.frame(d))
+
+    ## (2) Re-evaluate the original `data =` argument.
+    d <- tryCatch(eval(stats::getCall(model)$data,
+                       envir = environment(stats::formula(model))),
+                  error = function(e) NULL)
+    if (!is.null(d) && is.data.frame(d) && nrow(d) > 0L)
+        return(as.data.frame(d))
+
+    ## (3) Last resort: post-transformation model frame.  This will not
+    ## carry raw columns through inline transforms, so users with
+    ## `factor(group)` / `poly(x,2)` / `I(x^2)` in the formula can hit
+    ## "object 'group' not found" downstream.  Fix: pass `data = ` to
+    ## ginteff() explicitly, or re-fit with the transform pre-evaluated
+    ## as a column.
     d <- tryCatch(stats::model.frame(model), error = function(e) NULL)
-    if (is.null(d) || nrow(d) == 0L) {
-        d <- tryCatch(eval(stats::getCall(model)$data,
-                           envir = environment(stats::formula(model))),
-                      error = function(e) NULL)
-    }
-    if (is.null(d))
-        stop("Could not extract data from `model`. Pass `data = ...`.")
-    as.data.frame(d)
+    if (!is.null(d) && nrow(d) > 0L)
+        return(as.data.frame(d))
+
+    stop("Could not extract data from `model`. Pass `data = ...`.")
 }
 
 # =====================================================================

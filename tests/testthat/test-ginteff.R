@@ -112,3 +112,57 @@ test_that("as.data.frame.ginteff returns a tidy frame", {
                        "p.value", "conf.low", "conf.high"))
     expect_equal(nrow(df), 1L)
 })
+
+# T9: regression test for the inline-transform bug.  Before the fix in
+# .ginteff_get_data, ginteff() pulled `model.frame(model)` as the data
+# source -- which has columns named after the formula expression
+# (`factor(group)`, `poly(x1,2)`) rather than the raw variable.  When the
+# downstream predict() re-evaluated `predvars` against the counterfactual
+# grid, R couldn't find the raw column and errored with
+#   "object 'group' not found"
+# (or the dydxs lookup itself failed: "Variable(s) not found in data: x1").
+# After the fix, `.ginteff_get_data` prefers `model$data` / the original
+# `data =` argument, which still contain the raw columns.
+#
+# The test checks that AIE / SE from a model with inline `factor()` match
+# the AIE / SE from the same model fit with a pre-factored column.
+test_that("inline factor() / poly() in formula doesn't break ginteff()", {
+    set.seed(1)
+    n  <- 500
+    df <- data.frame(
+        y     = rbinom(n, 1, 0.3),
+        x1    = rnorm(n),
+        x2    = rnorm(n),
+        group = sample(1:5, n, replace = TRUE)
+    )
+    df$group_f <- factor(df$group)
+
+    ## ----- inline factor(group) -----
+    m_inline <- glm(y ~ x1 * x2 + factor(group),
+                    family = binomial(link = "probit"), data = df)
+    m_pre    <- glm(y ~ x1 * x2 + group_f,
+                    family = binomial(link = "probit"), data = df)
+
+    g_inline <- ginteff(m_inline, dydxs = c("x1", "x2"))
+    g_pre    <- ginteff(m_pre,    dydxs = c("x1", "x2"))
+    expect_equal(unname(g_inline$aie), unname(g_pre$aie), tolerance = 1e-10)
+    expect_equal(unname(g_inline$se),  unname(g_pre$se),  tolerance = 1e-10)
+
+    ## ----- inline poly(x1, 2) -----
+    m_poly <- glm(y ~ poly(x1, 2) * x2 + group_f,
+                  family = binomial(link = "probit"), data = df)
+    g_poly <- ginteff(m_poly, dydxs = c("x1", "x2"))
+    expect_true(is.finite(unname(g_poly$aie)))
+    expect_true(is.finite(unname(g_poly$se)))
+
+    ## ----- firstdiff path with inline factor -----
+    g_fd <- ginteff(m_inline, firstdiff = c("x1", "x2"),
+                    nunit = c(x1 = 1, x2 = 1))
+    expect_true(is.finite(unname(g_fd$aie)))
+    expect_true(is.finite(unname(g_fd$se)))
+
+    ## ----- obseff path with inline factor -----
+    g_obs <- ginteff(m_inline, dydxs = c("x1", "x2"), obseff = TRUE)
+    expect_equal(dim(g_obs$obseff), c(n, 1L))
+    expect_equal(mean(g_obs$obseff[, 1]), unname(g_obs$aie), tolerance = 1e-8)
+})

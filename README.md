@@ -48,6 +48,13 @@ ginteff(m, firstdiff = c("hp", "wt"), nunit = c(hp = 10, wt = 1))
 
 # Robust SEs
 ginteff(m, dydxs = c("hp", "wt"), vcov = "HC3")
+
+# Per-observation interaction effects (one row per observation, one
+# column per factor-level configuration). Useful for plotting the
+# distribution of effects across the sample. The default
+# obseff = FALSE returns only the AIE summary.
+gi <- ginteff(m, dydxs = c("hp", "wt"), obseff = TRUE)
+head(gi$obseff)
 ```
 
 A worked introduction lives in the package vignette:

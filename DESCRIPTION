@@ -1,7 +1,7 @@
 Package: ginteff
 Type: Package
 Title: Two- and Three-Way Interaction Effects (R Port of Stata's ginteff)
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(
     person("Jesper", "Wulff", role = c("aut", "cre"),
            email = "jwulff@econ.au.dk"),
