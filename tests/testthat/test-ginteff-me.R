@@ -186,10 +186,15 @@ test_that("polr 2-way FD via fallback: AIE matches Stata (SE not pinned)", {
     dat <- load_fixture()
     m <- MASS::polr(health_o ~ age * height + female_f + race_f + weight,
                     data = dat, Hess = TRUE)
-    g <- ginteff(m,
-                 firstdiff = c("age", "height"),
-                 nunit     = c(age = 1, height = 1),
-                 eqn       = 2L)
+    ## Since 0.2.0 ginteff() warns that this fit's vcov is unusable
+    ## (NaN diagonal entries from the ill-conditioned BFGS Hessian)
+    ## rather than silently propagating it.
+    expect_warning(
+        g <- ginteff(m,
+                     firstdiff = c("age", "height"),
+                     nunit     = c(age = 1, height = 1),
+                     eqn       = 2L),
+        "ill-conditioned")
     expect_equal(unname(g$aie), 9.520e-06, tolerance = 5e-3)
     expect_true(is.finite(unname(g$se)))
     expect_true(unname(g$se) > 0)

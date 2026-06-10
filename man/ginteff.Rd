@@ -54,20 +54,36 @@ variables (default: 1 each). May also be a single scalar.}
 (e.g. "response", "link"). Defaults to the model's
 marginaleffects default.}
 
-\item{vcov}{Variance-covariance specification, passed straight to
-marginaleffects (e.g. TRUE, "HC3", ~cluster, a matrix).}
+\item{vcov}{Variance-covariance specification (e.g. TRUE, "HC3",
+"robust", ~cluster, or a matrix). Strings and formulas
+are resolved through the sandwich package on the
+analytic path and passed straight to marginaleffects on
+the fallback path.}
 
-\item{weights}{Observation weights for the average, passed as \code{wts}.
-Either a numeric vector, the name of a column in the
-data, or NULL.}
+\item{weights}{Observation weights for the average. The default
+(\code{NULL}) uses the model's own estimation weights when
+it has any -- \code{svyglm} design weights, \code{lm}/\code{glm} prior
+weights, \code{polr}/\code{multinom} case weights -- matching
+Stata's \code{ginteff}, which respects estimation weights
+unless \code{noweights} is given. Pass \code{FALSE} to force an
+unweighted average (Stata's \code{noweights}), a numeric
+vector of length \code{nrow(data)}, or the name of a column
+in the data.}
 
 \item{level}{Confidence level (default 0.95).}
 
 \item{data}{Optional data frame; defaults to the model's data.}
 
-\item{h}{Step size for numerical differentiation in \code{dydxs}
-(continuous vars). Default sqrt(.Machine$double.eps)
-times a heuristic scale.}
+\item{h}{Step size(s) for the numerical cross-partial in \code{dydxs}
+(continuous variables only). Default: each variable
+gets its own step proportional to its standard
+deviation (1e-4 sd for one continuous variable, 0.01 sd
+for two, 0.05 sd for three) on the analytic engine; the
+marginaleffects fallback uses a single shared step
+scaled by the largest sd (tuned to stay above that
+engine's numerical-Jacobian noise floor). Supply a
+scalar to use one step for all variables, or a named
+vector for per-variable steps.}
 
 \item{eqn}{Outcome / equation selector for multi-outcome models
 (e.g. polr, multinom). Passed to marginaleffects via

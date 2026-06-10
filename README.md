@@ -82,7 +82,7 @@ the Stata-to-R argument map.
 | `intequation(#1)`      | `eqn = "outcome_label"` or integer index         |
 | `predict(p11)`         | `type = "..."` (model-specific)                  |
 | `vce(unconditional)`   | `vcov = ~cluster`, `"HC3"`, etc.                 |
-| `noweights`            | `weights = NULL`                                 |
+| `noweights`            | `weights = FALSE`                                |
 | `post`                 | not implemented (use `as.data.frame()`)          |
 
 ## Engines

@@ -23,7 +23,9 @@ ginteffplot(
 
 \item{output}{Integer index of the row of \code{aie} to plot when there
 is more than one result (e.g. multi-level factor).
-Default 1.}
+Default 1. Pass \code{NULL} (or \code{"all"}) to draw every row
+in one figure -- stacked panels sharing a common
+x-axis, the analogue of Stata's \verb{xcommon(*)}.}
 
 \item{obseff}{Logical. If TRUE, the per-observation interaction
 effects are plotted as a tick strip below the AIE.

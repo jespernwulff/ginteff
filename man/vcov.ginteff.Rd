@@ -13,6 +13,13 @@
 }
 \description{
 Returns the delta-method variance-covariance matrix of the average
-interaction effects stored in \code{object$aie}. Useful for chaining with
-downstream tools (e.g. \pkg{multcomp}, \pkg{car}::deltaMethod).
+interaction effects stored in \code{object$aie}. On the analytic engine
+(\code{lm} / \code{glm} / \code{svyglm}) this is the full joint matrix -- the
+off-diagonal entries are the covariances between rows (e.g. between
+the non-base contrasts of a multi-level factor), so a test of the
+difference between two interaction effects is
+\verb{(a' vcov(g) a)} with the appropriate contrast vector \code{a}. On the
+marginaleffects fallback (\code{polr}, \code{multinom}, ...) the matrix is
+diagonal. Useful for chaining with downstream tools (e.g.
+\pkg{multcomp}, \pkg{car}::deltaMethod).
 }

@@ -37,7 +37,9 @@ small \code{h}, and (b) pass through arbitrary \verb{vcov =} specifications
 \seealso{
 Useful links:
 \itemize{
+  \item \url{https://github.com/jespernwulff/ginteff}
   \item \doi{10.1177/1536867X231175253}
+  \item Report bugs at \url{https://github.com/jespernwulff/ginteff/issues}
 }
 
 }

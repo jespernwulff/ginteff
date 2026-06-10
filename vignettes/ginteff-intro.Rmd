@@ -34,10 +34,16 @@ Two paths are available:
                 $\Delta^k\,\mathrm{E}[y\mid x]/\Delta x_1\cdots\Delta x_k$,
                 where each $\Delta x_j$ is a user-specified unit increase.
 
-The package wraps `marginaleffects::avg_predictions()` to do the heavy
-lifting, then assembles the signed linear combination by hand so that
-arbitrary `vcov =` arguments (`"HC3"`, `~cluster`, sandwich matrices)
-propagate cleanly to the final SE.
+For `lm` / `glm` / `svyglm` fits the package computes the per-vertex
+average predictions and their gradients **analytically** (an exact
+delta-method engine, with one derivative step per continuous variable);
+for other classes (`polr`, `multinom`, ...) it wraps
+`marginaleffects::avg_predictions()`. Either way the signed linear
+combination is assembled by hand so that arbitrary `vcov =` arguments
+(`"HC3"`, `~cluster`, sandwich matrices) propagate cleanly to the final
+SE, and the model's own estimation weights (e.g. `svyglm` design
+weights) are respected by default -- pass `weights = FALSE` for an
+unweighted average (Stata's `noweights`).
 
 ## Setup
 
@@ -169,13 +175,16 @@ as.data.frame(ginteff(m2, firstdiff = c("age", "height", "weight"),
 
 ## When to prefer `firstdiff` vs `dydxs`
 
-* **two-way interactions**: either path is fine; the SEs match.
-* **three-way interactions on a non-linear link**: prefer
-  `firstdiff`. The numerical cross-partial in `dydxs` involves the
-  finite-difference quotient `(2h)^{-3}`, which amplifies any noise in
-  `marginaleffects`'s internally-computed prediction Jacobian; in
-  testing the resulting SE comes out ~10 % lower than Stata's analytic
-  computation. The `firstdiff` SE is exact regardless of `h`.
+* **`lm` / `glm` / `svyglm` (the analytic engine)**: either path is
+  accurate for two- and three-way effects; each continuous variable
+  gets its own derivative step scaled by its own sd, so differently
+  scaled variables are safe.
+* **other model classes (the `marginaleffects` fallback: `polr`,
+  `multinom`, ...)**: prefer `firstdiff` for three-way effects. The
+  numerical cross-partial in `dydxs` involves the finite-difference
+  quotient `(2h)^{-3}`, which amplifies noise in `marginaleffects`'s
+  internally computed prediction Jacobian; in testing the resulting SE
+  comes out ~10 % low. The `firstdiff` SE is exact regardless of `h`.
 
 ## Argument map vs Stata
 
@@ -190,3 +199,4 @@ as.data.frame(ginteff(m2, firstdiff = c("age", "height", "weight"),
 | `level(95)`            | `level = 0.95`                                   |
 | `intequation(#1)`      | `eqn = "outcome_label"` or integer index         |
 | `vce(unconditional)`   | `vcov = ~cluster` / `"HC3"` etc.                 |
+| `noweights`            | `weights = FALSE`                                |

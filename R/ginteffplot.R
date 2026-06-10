@@ -19,7 +19,9 @@
 #' @param x         A `ginteff` object.
 #' @param output    Integer index of the row of `aie` to plot when there
 #'                  is more than one result (e.g. multi-level factor).
-#'                  Default 1.
+#'                  Default 1. Pass `NULL` (or `"all"`) to draw every row
+#'                  in one figure -- stacked panels sharing a common
+#'                  x-axis, the analogue of Stata's `xcommon(*)`.
 #' @param obseff    Logical. If TRUE, the per-observation interaction
 #'                  effects are plotted as a tick strip below the AIE.
 #'                  Requires that `ginteff()` was called with `obseff = TRUE`.
@@ -50,14 +52,29 @@ ginteffplot <- function(x,
                         obs_color   = "grey40",
                         ...) {
     stopifnot(inherits(x, "ginteff"))
-    if (output < 1L || output > length(x$aie))
-        stop("`output` out of range; ginteff produced ",
-             length(x$aie), " result(s).")
 
     has_obs <- isTRUE(obseff) && !is.null(x$obseff)
     if (isTRUE(obseff) && is.null(x$obseff))
         warning("`obseff = TRUE` ignored: ginteff() was called without ",
                 "`obseff = TRUE`.")
+
+    ## output = NULL / "all": every row as a stacked panel on a common
+    ## x-axis (Stata's ginteffplot with xcommon(*)).
+    if (is.null(output) || identical(output, "all")) {
+        if (!is.null(against))
+            stop("`against` is not supported with output = NULL; ",
+                 "plot one output at a time.")
+        if (length(x$aie) == 1L) {
+            output <- 1L
+        } else {
+            return(.ginteffplot_all(x, has_obs, zeroline, xlab,
+                                    point_color, range_color, obs_color))
+        }
+    }
+
+    if (output < 1L || output > length(x$aie))
+        stop("`output` out of range; ginteff produced ",
+             length(x$aie), " result(s).")
 
     aie <- as.numeric(x$aie[output])
     se  <- as.numeric(x$se[output])
@@ -260,6 +277,96 @@ ginteffplot <- function(x,
     invisible(NULL)
 }
 
+
+# ---- all-outputs (faceted / stacked) view ----------------------------------
+
+.ginteffplot_all <- function(x, has_obs, zeroline, xlab,
+                             point_color, range_color, obs_color) {
+    k    <- length(x$aie)
+    labs <- x$labels
+    if (is.null(xlab)) xlab <- "Interaction effect"
+
+    if (requireNamespace("ggplot2", quietly = TRUE)) {
+        df_aie <- data.frame(
+            label = factor(labs, levels = labs),
+            x  = as.numeric(x$aie),
+            lo = as.numeric(x$ci[, 1]),
+            hi = as.numeric(x$ci[, 2]),
+            y  = 2
+        )
+        p <- ggplot2::ggplot()
+        if (zeroline)
+            p <- p + ggplot2::geom_vline(xintercept = 0,
+                                         linetype = "dotted",
+                                         colour = "grey50")
+        if (has_obs) {
+            df_obs <- data.frame(
+                label = factor(rep(labs, each = nrow(x$obseff)),
+                               levels = labs),
+                x = as.numeric(x$obseff),
+                y = 1
+            )
+            p <- p + ggplot2::geom_point(
+                data = df_obs,
+                mapping = ggplot2::aes(x = x, y = y),
+                shape = "|", size = 4, alpha = 0.5, colour = obs_color)
+        }
+        p <- p +
+            ggplot2::geom_errorbarh(
+                data = df_aie,
+                mapping = ggplot2::aes(xmin = lo, xmax = hi, y = y),
+                height = 0.15, colour = range_color, linewidth = 0.6) +
+            ggplot2::geom_point(
+                data = df_aie,
+                mapping = ggplot2::aes(x = x, y = y),
+                shape = 15, size = 3, colour = point_color) +
+            ggplot2::facet_wrap(~label, ncol = 1) +
+            ggplot2::scale_y_continuous(
+                breaks = if (has_obs) c(1, 2) else 2,
+                labels = if (has_obs) c("Individual", "AIE") else "AIE",
+                limits = c(0.5, 2.6)) +
+            ggplot2::labs(
+                x = xlab, y = NULL,
+                title = "Average interaction effects",
+                subtitle = sprintf(
+                    "Capped spikes: %.0f%% CIs (delta method); common x-axis",
+                    100 * x$level)) +
+            ggplot2::theme_classic() +
+            ggplot2::theme(
+                axis.line.y        = ggplot2::element_blank(),
+                axis.ticks.y       = ggplot2::element_blank(),
+                panel.grid.major.y = ggplot2::element_blank(),
+                strip.background   = ggplot2::element_blank(),
+                strip.text         = ggplot2::element_text(hjust = 0))
+        return(p)
+    }
+
+    ## base-graphics fallback: stacked panels via mfrow, common xlim
+    op <- graphics::par(mfrow = c(k, 1), mar = c(4, 6, 2, 1))
+    on.exit(graphics::par(op), add = TRUE)
+    xs <- c(x$ci)
+    if (has_obs) xs <- c(xs, as.numeric(x$obseff))
+    pad  <- 0.04 * diff(range(xs, na.rm = TRUE))
+    xlim <- range(xs, na.rm = TRUE) + c(-pad, pad)
+    for (i in seq_len(k)) {
+        obs_i <- if (has_obs) as.numeric(x$obseff[, i]) else NULL
+        graphics::plot.new()
+        graphics::plot.window(xlim = xlim, ylim = c(0.5, 2.6))
+        graphics::axis(1)
+        graphics::title(main = x$labels[i], xlab = xlab, cex.main = 0.9)
+        if (zeroline) graphics::abline(v = 0, col = "grey50", lty = 3)
+        if (!is.null(obs_i))
+            graphics::segments(obs_i, 1 - 0.12, obs_i, 1 + 0.12,
+                               col = grDevices::adjustcolor(obs_color, 0.5))
+        lo <- x$ci[i, 1]; hi <- x$ci[i, 2]
+        graphics::segments(lo, 2, hi, 2, col = range_color, lwd = 1.5)
+        graphics::segments(c(lo, hi), 2 - 0.1, c(lo, hi), 2 + 0.1,
+                           col = range_color, lwd = 1.5)
+        graphics::points(x$aie[i], 2, pch = 15, col = point_color,
+                         cex = 1.4)
+    }
+    invisible(NULL)
+}
 
 #' @export
 plot.ginteff <- function(x, ...) ginteffplot(x, ...)

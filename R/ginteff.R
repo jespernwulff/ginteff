@@ -48,16 +48,32 @@
 #' @param type       Prediction scale, passed to marginaleffects::predictions
 #'                   (e.g. "response", "link"). Defaults to the model's
 #'                   marginaleffects default.
-#' @param vcov       Variance-covariance specification, passed straight to
-#'                   marginaleffects (e.g. TRUE, "HC3", ~cluster, a matrix).
-#' @param weights    Observation weights for the average, passed as `wts`.
-#'                   Either a numeric vector, the name of a column in the
-#'                   data, or NULL.
+#' @param vcov       Variance-covariance specification (e.g. TRUE, "HC3",
+#'                   "robust", ~cluster, or a matrix). Strings and formulas
+#'                   are resolved through the sandwich package on the
+#'                   analytic path and passed straight to marginaleffects on
+#'                   the fallback path.
+#' @param weights    Observation weights for the average. The default
+#'                   (`NULL`) uses the model's own estimation weights when
+#'                   it has any -- `svyglm` design weights, `lm`/`glm` prior
+#'                   weights, `polr`/`multinom` case weights -- matching
+#'                   Stata's `ginteff`, which respects estimation weights
+#'                   unless `noweights` is given. Pass `FALSE` to force an
+#'                   unweighted average (Stata's `noweights`), a numeric
+#'                   vector of length `nrow(data)`, or the name of a column
+#'                   in the data.
 #' @param level      Confidence level (default 0.95).
 #' @param data       Optional data frame; defaults to the model's data.
-#' @param h          Step size for numerical differentiation in `dydxs`
-#'                   (continuous vars). Default sqrt(.Machine$double.eps)
-#'                   times a heuristic scale.
+#' @param h          Step size(s) for the numerical cross-partial in `dydxs`
+#'                   (continuous variables only). Default: each variable
+#'                   gets its own step proportional to its standard
+#'                   deviation (1e-4 sd for one continuous variable, 0.01 sd
+#'                   for two, 0.05 sd for three) on the analytic engine; the
+#'                   marginaleffects fallback uses a single shared step
+#'                   scaled by the largest sd (tuned to stay above that
+#'                   engine's numerical-Jacobian noise floor). Supply a
+#'                   scalar to use one step for all variables, or a named
+#'                   vector for per-variable steps.
 #' @param eqn        Outcome / equation selector for multi-outcome models
 #'                   (e.g. polr, multinom). Passed to marginaleffects via
 #'                   the `type` argument or by post-filtering, depending on
@@ -171,43 +187,69 @@ ginteff <- function(model,
                 "the interaction effect is then trivially 0.")
     }
 
-    ## ---- h for numerical derivatives -------------------------------------
-    ## Default scales with the order of differentiation k_cont:
-    ##   k=1 (single continuous dydxs var):  1e-4 * max sd(x)
-    ##   k=2 (typical 2-way cross-partial):  0.01 * max sd(x)
-    ##   k=3 (3-way cross-partial):           0.05 * max sd(x)
-    ##
-    ## The larger step at higher k is necessary because marginaleffects
-    ## computes the prediction Jacobian numerically with an internal step
-    ## ~1e-7--1e-8; c'V_ap c relies on small differences across vertices
-    ## that fall below that noise floor when h is small, and the noise is
-    ## amplified by (2h)^(-2k). Bias from finite differencing is O(h^2);
-    ## at h=0.05*sd the AIE drift on a smooth response is <0.01%.
-    ##
-    ## A residual quirk: for k=3 the SE in the stable plateau tends to be
-    ## ~10% lower than Stata's analytic answer. This is a finite-difference
-    ## artifact in the c'V_ap c term. If you need analytical-quality SEs
-    ## for 3-way effects, prefer the FD path (`firstdiff = `) -- the FD
-    ## variance is exact (no h-divisor amplifies the noise).
-    cont_dydxs <- dydxs_v[!is_fac[dydxs_v]]
-    if (is.null(h)) {
-        k_cont <- length(cont_dydxs)
-        if (k_cont) {
-            sds <- vapply(cont_dydxs,
-                          function(v) {
-                              x <- as.numeric(data[[v]])
-                              s <- stats::sd(x, na.rm = TRUE)
-                              if (!is.finite(s) || s == 0) 1 else s
-                          }, numeric(1))
-            scale_sd <- max(sds)
-            h <- switch(min(k_cont, 3L),
-                        `1` = 1e-4 * scale_sd,
-                        `2` = 0.01 * scale_sd,
-                        `3` = 0.05 * scale_sd)
-        } else {
-            h <- 1e-4
-        }
+    ## ---- Engine ------------------------------------------------------------
+    ## Analytic for lm / glm / svyglm (exact Stata-equivalent SEs);
+    ## marginaleffects for everything else (polr, multinom, ...). The
+    ## analytic path also handles `vcov` strings ("HC3" etc) and ~cluster
+    ## formulas via the sandwich package.
+    engine <- if (inherits(model, c("glm", "lm", "svyglm")) &&
+                  !inherits(model, c("polr", "multinom")))
+                  "analytic"
+              else
+                  "marginaleffects"
+
+    if (engine == "analytic" && !is.null(eqn))
+        warning("`eqn` is ignored for single-outcome models (",
+                paste(class(model), collapse = "/"), ").", call. = FALSE)
+
+    ## Fallback models inherit whatever vcov the fitter produced; surface
+    ## a warning when that matrix is itself unusable (e.g. an
+    ## ill-conditioned polr/multinom Hessian from poorly scaled
+    ## interacted regressors) so a bad SE is not mistaken for a good one.
+    if (engine == "marginaleffects")
+        .ginteff_check_model_vcov(model)
+
+    ## ---- Weights ------------------------------------------------------------
+    ## NULL (default): use the model's own estimation weights when present
+    ## (svyglm design weights, lm/glm prior weights, polr/multinom case
+    ## weights) -- Stata's ginteff behaviour. FALSE: Stata's `noweights`.
+    if (isFALSE(weights)) {
+        weights <- NULL
+    } else if (is.null(weights)) {
+        weights <- .ginteff_default_weights(model, nrow(base_data))
+    } else if (is.character(weights) && length(weights) == 1L) {
+        if (!weights %in% names(base_data))
+            stop("`weights` column `", weights, "` not found in data.")
+        weights <- as.numeric(base_data[[weights]])
     }
+    if (is.numeric(weights) && length(weights) != nrow(base_data))
+        stop("`weights` length (", length(weights),
+             ") must match the evaluation data (", nrow(base_data), ").")
+
+    ## ---- h for numerical derivatives -------------------------------------
+    ## Default magnitude scales with the order of differentiation k_cont:
+    ##   k=1:  1e-4 * sd(x)    k=2:  0.01 * sd(x)    k=3:  0.05 * sd(x)
+    ##
+    ## On the analytic engine each continuous variable gets its own step
+    ## proportional to its own sd. A single shared step based on max(sd)
+    ## perturbs a small-scale variable by many of its own sds when the
+    ## interacted variables live on very different scales, which destroys
+    ## the local derivative (the pre-0.2.0 behaviour).
+    ##
+    ## On the marginaleffects fallback the shared max(sd) step is kept:
+    ## that engine computes the prediction Jacobian numerically with an
+    ## internal step ~1e-7--1e-8, and c'V_ap c relies on differences
+    ## across vertices that must stay above that noise floor (the noise
+    ## is amplified by the (2h)^(-2k) divisor). The larger k defaults
+    ## exist for the same reason. Bias from finite differencing is
+    ## O(h^2); at h=0.05*sd the AIE drift on a smooth response is <0.01%.
+    ##
+    ## A residual quirk: for k=3 on the fallback the SE tends to sit
+    ## ~10% below Stata's analytic answer -- an FD artifact in c'V_ap c.
+    ## For analytical-quality 3-way SEs prefer `firstdiff = ` (the FD
+    ## variance is exact; no h-divisor amplifies the noise).
+    cont_dydxs <- dydxs_v[!is_fac[dydxs_v]]
+    h <- .ginteff_resolve_h(h, cont_dydxs, data, engine)
 
     ## ---- Enumerate factor-level configurations ---------------------------
     fac_dx     <- dydxs_v[is_fac[dydxs_v]]
@@ -243,16 +285,6 @@ ginteff <- function(model,
     colnames(combos) <- all_v
     signs  <- (-1L)^(nv - rowSums(combos))
 
-    ## Pick engine: analytic for lm / glm / svyglm (exact Stata-equivalent
-    ## SEs); marginaleffects for everything else (polr, multinom, ...).
-    ## The analytic path also handles `vcov` strings ("HC3" etc) and
-    ## ~cluster formulas via the sandwich package.
-    engine <- if (inherits(model, c("glm", "lm", "svyglm")) &&
-                  !inherits(model, c("polr", "multinom")))
-                  "analytic"
-              else
-                  "marginaleffects"
-
     res_list <- vector("list", length(configs))
     obs_mat  <- if (isTRUE(obseff))
                     matrix(NA_real_, nrow(base_data), length(configs))
@@ -271,9 +303,8 @@ ginteff <- function(model,
                                   units     = units,
                                   h         = h)
 
-        cont_dx_count <- sum(!is_fac[dydxs_v])
-        divisor       <- if (cont_dx_count > 0L) (2 * h)^cont_dx_count else 1
-        scale         <- 1 / divisor
+        divisor <- if (length(cont_dydxs)) prod(2 * h[cont_dydxs]) else 1
+        scale   <- 1 / divisor
 
         if (engine == "analytic") {
             res <- .ginteff_compute_analytic(
@@ -310,7 +341,9 @@ ginteff <- function(model,
             p        = res$p,
             lower    = res$lower,
             upper    = res$upper,
-            ap       = res$ap
+            ap       = res$ap,
+            grad     = res$grad,
+            V_coef   = res$V_coef
         )
 
         if (isTRUE(obseff)) {
@@ -355,12 +388,20 @@ ginteff <- function(model,
               else if (length(dydxs_v) == 0L) "firstdiff"
               else "mixed"
 
-    ## Diagonal vcov of the AIE vector.  The off-diagonal cross-config
-    ## covariances would require joint Jacobians of all configs against
-    ## the model coefficients; for the typical case (one config = pure
-    ## continuous, or one config per non-base factor level evaluated
-    ## independently) the diagonal is what users reach for via vcov().
-    aie_V <- diag(se^2, nrow = length(se))
+    ## Variance-covariance of the AIE vector.  On the analytic engine the
+    ## per-config gradients w.r.t. the model coefficients are available,
+    ## so the full joint vcov G V G' is formed -- including the
+    ## off-diagonal covariances between configs (e.g. the two non-base
+    ## contrasts of a multi-level factor), which is what a test of the
+    ## difference between two interaction effects needs.  The
+    ## marginaleffects fallback keeps the diagonal-only matrix.
+    grads <- lapply(res_list, `[[`, "grad")
+    if (length(grads) && !any(vapply(grads, is.null, logical(1)))) {
+        G     <- do.call(rbind, grads)
+        aie_V <- G %*% res_list[[1L]]$V_coef %*% t(G)
+    } else {
+        aie_V <- diag(se^2, nrow = length(se))
+    }
     rownames(aie_V) <- colnames(aie_V) <- labels
 
     out <- list(
@@ -445,22 +486,28 @@ ginteff <- function(model,
     avgP     <- numeric(nvert)
     Jt       <- matrix(0, nvert, p, dimnames = list(NULL, names(beta)))
 
-    ## Determine which rows of base_data survive NA filtering.  We use
-    ## the first vertex (no perturbation that introduces NAs) as the
-    ## reference; FD vertices that add a unit shouldn't change which
-    ## rows have NAs in the model variables.
-    rows_kept <- NULL
-    obs_mat   <- if (isTRUE(want_obs)) matrix(NA_real_, 0, nvert) else NULL
-
+    ## Build all per-vertex model frames first and take the *common*
+    ## complete-case mask.  Using vertex 1's mask for every vertex (the
+    ## pre-0.2.0 behaviour) silently misaligned rows -- and broke the
+    ## obseff matrix -- whenever a perturbed vertex had a different NA
+    ## pattern than the baseline.
+    mfs <- vector("list", nvert)
     for (k in seq_len(nvert)) {
         nd_v <- cf[cf[[".__vertex"]] == vertices[k], , drop = FALSE]
-        mf <- stats::model.frame(rhs_form, nd_v, xlev = xlev,
-                                 na.action = stats::na.pass)
-        keep <- stats::complete.cases(mf)
-        if (k == 1L) rows_kept <- keep   # for obseff padding later
-        mf  <- mf[keep, , drop = FALSE]
-        n   <- nrow(mf)
-        if (n == 0L) stop("No complete-case rows in vertex ", k, ".")
+        mfs[[k]] <- stats::model.frame(rhs_form, nd_v, xlev = xlev,
+                                       na.action = stats::na.pass)
+    }
+    keep <- Reduce(`&`, lapply(mfs, stats::complete.cases))
+    n    <- sum(keep)
+    if (n == 0L) stop("No rows are complete cases in every vertex.")
+
+    w <- if (is.numeric(weights)) weights[keep] else NULL
+    wsum <- if (!is.null(w)) sum(w) else n
+
+    obs_mat <- if (isTRUE(want_obs)) matrix(0, n, nvert) else NULL
+
+    for (k in seq_len(nvert)) {
+        mf <- mfs[[k]][keep, , drop = FALSE]
 
         X <- stats::model.matrix(rhs_form, mf, contrasts.arg = contr)
         ## Align columns to beta's order; missing cols => 0; extra cols
@@ -475,27 +522,20 @@ ginteff <- function(model,
         mu  <- fam$linkinv(eta)
         me  <- fam$mu.eta(eta)
 
-        if (is.null(weights)) {
+        if (is.null(w)) {
             avgP[k] <- mean(mu)
             Jt[k, ] <- as.numeric(crossprod(Xa, me)) / n
         } else {
-            w <- if (is.numeric(weights)) weights[which(rows_kept)] else NULL
-            if (is.null(w))
-                stop("Analytic engine: only numeric `weights` are supported.")
-            wsum <- sum(w)
             avgP[k] <- sum(w * mu) / wsum
             Jt[k, ] <- as.numeric(crossprod(Xa, w * me)) / wsum
         }
 
-        if (isTRUE(want_obs)) {
-            if (k == 1L)
-                obs_mat <- matrix(0, n, nvert)
-            obs_mat[, k] <- mu
-        }
+        if (isTRUE(want_obs)) obs_mat[, k] <- mu
     }
 
     L     <- as.numeric(sum(signs * avgP)) * scale
     g     <- as.numeric(crossprod(Jt, signs)) * scale
+    names(g) <- names(beta)
     var_L <- as.numeric(t(g) %*% V %*% g)
     var_L <- max(var_L, 0)
     seL   <- sqrt(var_L)
@@ -514,7 +554,9 @@ ginteff <- function(model,
         upper    = L + z_q * seL,
         ap       = NULL,
         obs      = obs_per,
-        keep     = rows_kept
+        keep     = keep,
+        grad     = g,
+        V_coef   = V
     )
 }
 
@@ -579,8 +621,15 @@ ginteff <- function(model,
     if (is.null(vcov_arg) || isTRUE(vcov_arg))
         return(stats::vcov(model))
     if (is.character(vcov_arg)) {
+        ## Aliases follow marginaleffects' conventions so the same string
+        ## means the same thing on both engines.
+        key <- tolower(vcov_arg)
+        if (key %in% c("classical", "constant", "iid"))
+            return(stats::vcov(model))
         if (!requireNamespace("sandwich", quietly = TRUE))
             stop("vcov = '", vcov_arg, "' requires the 'sandwich' package.")
+        if (key == "robust") return(sandwich::vcovHC(model))
+        if (key == "stata")  return(sandwich::vcovHC(model, type = "HC1"))
         return(sandwich::vcovHC(model, type = vcov_arg))
     }
     if (inherits(vcov_arg, "formula")) {
@@ -589,6 +638,96 @@ ginteff <- function(model,
         return(sandwich::vcovCL(model, cluster = vcov_arg))
     }
     stop("Unsupported `vcov` specification.")
+}
+
+# =====================================================================
+# Internal: per-variable h resolution for dydxs cross-partials.
+#
+# Returns a named numeric vector over the continuous dydxs variables.
+# Defaults scale each variable's step by its own sd on the analytic
+# engine; the marginaleffects fallback keeps the legacy shared
+# max(sd) step (tuned to its numerical-Jacobian noise floor).
+# =====================================================================
+
+.ginteff_resolve_h <- function(h, cont_dydxs, data, engine) {
+    k_cont <- length(cont_dydxs)
+    if (k_cont == 0L)
+        return(if (is.null(h)) 1e-4 else as.numeric(h)[1L])
+
+    if (!is.null(h)) {
+        if (length(h) == 1L && is.null(names(h)))
+            return(stats::setNames(rep(as.numeric(h), k_cont), cont_dydxs))
+        if (is.null(names(h)))
+            stop("`h` must be a single number or a named vector.")
+        bad <- setdiff(names(h), cont_dydxs)
+        if (length(bad))
+            stop("`h` names not among the continuous dydxs variables: ",
+                 paste(bad, collapse = ", "))
+        out <- .ginteff_resolve_h(NULL, cont_dydxs, data, engine)
+        out[names(h)] <- as.numeric(h)
+        return(out)
+    }
+
+    sds <- vapply(cont_dydxs,
+                  function(v) {
+                      x <- as.numeric(data[[v]])
+                      s <- stats::sd(x, na.rm = TRUE)
+                      if (!is.finite(s) || s == 0) 1 else s
+                  }, numeric(1))
+    c_k <- switch(min(k_cont, 3L),
+                  `1` = 1e-4,
+                  `2` = 0.01,
+                  `3` = 0.05)
+    if (identical(engine, "analytic"))
+        stats::setNames(c_k * sds, cont_dydxs)
+    else
+        stats::setNames(rep(c_k * max(sds), k_cont), cont_dydxs)
+}
+
+# =====================================================================
+# Internal: the model's own estimation weights (Stata parity).
+#
+# Returns a numeric weights vector aligned with the evaluation data, or
+# NULL when the model is unweighted / weights cannot be recovered /
+# the length does not match.  Uniform weights collapse to NULL (the
+# unweighted fast path gives the same average).
+# =====================================================================
+
+.ginteff_default_weights <- function(model, n_expected) {
+    w <- tryCatch(stats::weights(model), error = function(e) NULL)
+    if (is.null(w) || !length(w))
+        w <- tryCatch(stats::model.weights(stats::model.frame(model)),
+                      error = function(e) NULL)
+    if (is.null(w) || !is.numeric(w) || !length(w)) return(NULL)
+    if (anyNA(w)) w <- w[!is.na(w)]
+    if (length(w) != n_expected) return(NULL)
+    if (isTRUE(all(w == w[1L]))) return(NULL)
+    as.numeric(w)
+}
+
+# =====================================================================
+# Internal: warn when a fallback model's own vcov is unusable.
+# =====================================================================
+
+.ginteff_check_model_vcov <- function(model) {
+    V <- tryCatch(stats::vcov(model), error = function(e) NULL)
+    if (is.null(V) || !is.matrix(V)) return(invisible(NULL))
+    dV <- diag(V)
+    bad_finite <- !all(is.finite(dV))
+    rc <- if (bad_finite) NA_real_
+          else tryCatch(rcond(V), error = function(e) NA_real_)
+    if (bad_finite || (is.finite(rc) && rc < 1e-14)) {
+        warning("The model's coefficient variance-covariance matrix ",
+                "appears ill-conditioned",
+                if (bad_finite) " (non-finite entries)"
+                else sprintf(" (reciprocal condition number %.1e)", rc),
+                ". Interaction-effect standard errors inherit it and may ",
+                "be unreliable. Consider rescaling the interacted ",
+                "variables or refitting with a better-conditioned ",
+                "implementation (e.g. ordinal::clm for ordered models).",
+                call. = FALSE)
+    }
+    invisible(NULL)
 }
 
 # =====================================================================
@@ -634,8 +773,11 @@ ginteff <- function(model,
                     nd[[v]] <- rep(target, n)
                 }
             } else {
-                ## continuous in dydxs: central diff around obs
-                nd[[v]] <- x + (if (hi) h else -h)
+                ## continuous in dydxs: central diff around obs, using
+                ## that variable's own step
+                h_v <- if (!is.null(names(h)) && v %in% names(h)) h[[v]]
+                       else h[[1L]]
+                nd[[v]] <- x + (if (hi) h_v else -h_v)
             }
         }
         nd[[".__vertex"]] <- i
@@ -702,6 +844,9 @@ ginteff <- function(model,
             p <- p[as.character(p$group) == target, , drop = FALSE]
         }
     }
+    ## The reshape below assumes rows arrive in cf (vertex-major) order;
+    ## restore it explicitly in case predictions() sorted by group.
+    if ("rowid" %in% names(p)) p <- p[order(p$rowid), , drop = FALSE]
     n     <- nrow(base_data)
     nvert <- nrow(combos)
     ## Each vertex contributes n rows in order; reshape to n x nvert.
@@ -927,6 +1072,29 @@ ginteff <- function(model,
 # Methods: print / summary / coef / vcov / confint
 # =====================================================================
 
+## Shared formatter: one row per effect, the CI as a single bracketed
+## column so the table fits a standard console / rendered code block
+## without wrapping.  print() mirrors Stata's ginteff output (Statistic,
+## Std. Err., CI); summary() adds the z and p columns.
+.ginteff_format_table <- function(aie, se, z, p, ci, labels, level,
+                                  digits = 4, zp = FALSE) {
+    num <- function(v) formatC(v, digits = digits, format = "g")
+    tab <- data.frame(
+        AIE = num(aie),
+        SE  = num(se),
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+    )
+    if (isTRUE(zp)) {
+        tab$z       <- formatC(z, digits = 3, format = "f")
+        tab$`P>|z|` <- formatC(p, digits = 3, format = "f")
+    }
+    tab$ci <- sprintf("[%s, %s]", num(ci[, 1]), num(ci[, 2]))
+    names(tab)[names(tab) == "ci"] <- sprintf("%.0f%% CI", 100 * level)
+    rownames(tab) <- labels
+    tab
+}
+
 #' @export
 print.ginteff <- function(x, digits = 4, ...) {
     cat("\nInteraction Effects (ginteff)\n")
@@ -941,20 +1109,8 @@ print.ginteff <- function(x, digits = 4, ...) {
     }
     cat("N        : ", x$n, "\n", sep = "")
     cat("\nAverage interaction effect(s):\n")
-    tab <- data.frame(
-        AIE   = x$aie,
-        SE    = x$se,
-        z     = x$z,
-        p     = x$p,
-        lower = x$ci[, 1],
-        upper = x$ci[, 2],
-        check.names = FALSE
-    )
-    rownames(tab) <- x$labels
-    ## Use significant digits so very small AIEs (e.g. 1e-6) still print
-    ## with non-zero figures, while moderate ones still align nicely.
-    print(format(tab, digits = digits, scientific = FALSE,
-                 zero.print = "0"))
+    print(.ginteff_format_table(x$aie, x$se, x$z, x$p, x$ci,
+                                x$labels, x$level, digits))
     invisible(x)
 }
 
@@ -987,8 +1143,11 @@ print.summary.ginteff <- function(x, digits = 4, ...) {
     cat("\nMethod : ", x$method, "\n", sep = "")
     cat("N      : ", x$n,      "\n", sep = "")
     cat("Level  : ", x$level,  "\n\n", sep = "")
-    print(format(x$table, digits = digits, scientific = FALSE,
-                 zero.print = "0"))
+    print(.ginteff_format_table(x$table$AIE, x$table$SE, x$table$z,
+                                x$table$p,
+                                cbind(x$table$lower, x$table$upper),
+                                rownames(x$table), x$level, digits,
+                                zp = TRUE))
     invisible(x)
 }
 
@@ -998,8 +1157,15 @@ coef.ginteff <- function(object, ...) object$aie
 #' Variance-covariance matrix of the AIE vector
 #'
 #' Returns the delta-method variance-covariance matrix of the average
-#' interaction effects stored in `object$aie`. Useful for chaining with
-#' downstream tools (e.g. \pkg{multcomp}, \pkg{car}::deltaMethod).
+#' interaction effects stored in `object$aie`. On the analytic engine
+#' (`lm` / `glm` / `svyglm`) this is the full joint matrix -- the
+#' off-diagonal entries are the covariances between rows (e.g. between
+#' the non-base contrasts of a multi-level factor), so a test of the
+#' difference between two interaction effects is
+#' `(a' vcov(g) a)` with the appropriate contrast vector `a`. On the
+#' marginaleffects fallback (`polr`, `multinom`, ...) the matrix is
+#' diagonal. Useful for chaining with downstream tools (e.g.
+#' \pkg{multcomp}, \pkg{car}::deltaMethod).
 #'
 #' @param object a `ginteff` object
 #' @param ... ignored
