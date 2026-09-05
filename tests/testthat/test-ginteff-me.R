@@ -199,3 +199,79 @@ test_that("polr 2-way FD via fallback: AIE matches Stata (SE not pinned)", {
     expect_true(is.finite(unname(g$se)))
     expect_true(unname(g$se) > 0)
 })
+
+# ---------------------------------------------------------------------------
+# TM9: a user-supplied *named* coefficient vcov matrix on the fallback must
+# reproduce the default (vcov = TRUE) result.  polr's vcov(m) lists the
+# slopes before the thresholds while marginaleffects' get_coef() puts the
+# thresholds first; ginteff aligns the matrix by name before handing it
+# over (marginaleffects < 1.0.0 matched positionally and returned a wildly
+# wrong SE for exactly this matrix).
+# ---------------------------------------------------------------------------
+test_that("named vcov matrix on the fallback matches vcov = TRUE", {
+    skip_unless_me()
+    skip_if_not_installed("MASS")
+    dat <- load_fixture()
+    m <- MASS::polr(health_o ~ age * female_f + race_f,
+                    data = dat, Hess = TRUE)
+    g0 <- ginteff(m, dydxs = c("age", "female_f"), eqn = 2L)
+    g1 <- ginteff(m, dydxs = c("age", "female_f"), eqn = 2L, vcov = vcov(m))
+    expect_equal(unname(g1$aie), unname(g0$aie), tolerance = 1e-10)
+    expect_equal(unname(g1$se),  unname(g0$se),  tolerance = 1e-6)
+})
+
+# ---------------------------------------------------------------------------
+# TM10: factor x factor through the fallback with obseff = TRUE.  This is
+# the grid on which marginaleffects 1.0.0 drops the `.__vertex` grouping
+# column (factor-level padding + multi-outcome model); ginteff completes
+# the absent levels itself so no padding happens.  The per-observation
+# matrix must average to the AIE and carry one column per non-base race
+# level, and the AIE / SE must still hit the Stata pins from TM2.
+# ---------------------------------------------------------------------------
+test_that("factor x factor via the fallback with obseff: mean(obseff) == AIE", {
+    skip_unless_me()
+    skip_if_not_installed("MASS")
+    dat <- load_fixture()
+    m <- MASS::polr(health_o ~ female_f * race_f + age,
+                    data = dat, Hess = TRUE)
+    g <- ginteff(m, dydxs = c("female_f", "race_f"), eqn = 2L, obseff = TRUE)
+    expect_equal(dim(g$obseff), c(nrow(dat), 2L))
+    expect_equal(unname(colMeans(g$obseff)), unname(g$aie), tolerance = 1e-8)
+    expect_equal(unname(g$aie), c( 0.00085646, -0.00480777), tolerance = 1e-4)
+    expect_equal(unname(g$se),  c( 0.00943743,  0.00976232), tolerance = 1e-4)
+})
+
+# ---------------------------------------------------------------------------
+# TM11: the level-completion rows are inert.  An unused factor column with
+# an absent level forces completion on a grid that otherwise needs none;
+# the result must be identical to the plain run.
+# ---------------------------------------------------------------------------
+test_that("level-completion rows do not alter per-vertex averages", {
+    skip_unless_me()
+    skip_if_not_installed("MASS")
+    dat <- load_fixture()
+    m <- MASS::polr(health_o ~ age * female_f + race_f,
+                    data = dat, Hess = TRUE)
+    g0 <- ginteff(m, dydxs = c("age", "female_f"), eqn = 2L)
+    dat2 <- dat
+    dat2$junk <- factor("a", levels = c("a", "b"))
+    g1 <- ginteff(m, dydxs = c("age", "female_f"), eqn = 2L, data = dat2)
+    expect_equal(unname(g1$aie), unname(g0$aie), tolerance = 1e-12)
+    expect_equal(unname(g1$se),  unname(g0$se),  tolerance = 1e-10)
+})
+
+# ---------------------------------------------------------------------------
+# TM12: the derivative-step policy on the fallback follows the installed
+# marginaleffects version -- per-variable steps (each variable's own sd)
+# from 1.0.0, the shared max(sd) step before that.
+# ---------------------------------------------------------------------------
+test_that("fallback step policy follows the marginaleffects version", {
+    skip_unless_me()
+    dat <- load_fixture()
+    h   <- .ginteff_resolve_h(NULL, c("age", "height"), dat, "marginaleffects")
+    sds <- c(age = stats::sd(dat$age), height = stats::sd(dat$height))
+    if (utils::packageVersion("marginaleffects") >= "1.0.0")
+        expect_equal(h, 0.01 * sds)
+    else
+        expect_equal(unname(h), rep(0.01 * max(sds), 2L))
+})

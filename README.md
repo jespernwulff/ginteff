@@ -29,9 +29,10 @@ the final interaction-effect SE.
 remotes::install_github("jespernwulff/ginteff")
 ```
 
-`marginaleffects` (>= 0.21.0) is the only required dependency.
-Optional: `ggplot2`, `MASS`, `nnet`, `sandwich` for plotting / ordered
-& multinomial models / robust SEs.
+`marginaleffects` (>= 0.21.0) is the only required dependency; the
+current release (1.0.0) is supported and recommended. Optional:
+`ggplot2`, `MASS`, `nnet`, `sandwich` for plotting / ordered &
+multinomial models / robust SEs.
 
 ## Quick start
 
@@ -96,9 +97,10 @@ the Stata-to-R argument map.
   precision in every case we've tested.
 - **`marginaleffects` fallback** for `polr`, `multinom`, and any
   other class `marginaleffects` supports. AIEs match Stata to 4-5
-  sig figs; SEs match exactly on factor # factor and within ~1-3% on
-  continuous # factor (the small drift is the FD cross-partial inside
-  `avg_predictions`).
+  sig figs; SEs match exactly on factor # factor and, with
+  marginaleffects >= 1.0.0, within ~0.05% on continuous # factor
+  (1-3% with older marginaleffects, whose numerical Jacobian is
+  noisier). Tested against marginaleffects 0.32.0 and 1.0.0.
 
 ## Side-by-side verification
 

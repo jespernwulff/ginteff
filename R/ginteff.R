@@ -9,17 +9,34 @@
 ## The job split is:
 ##   * ginteff() builds the counterfactual hypercube of "vertices" needed
 ##     to express the interaction effect as a signed linear combination
-##     of average predictions, calls marginaleffects::avg_predictions(),
-##     and then asks marginaleffects::hypotheses() to evaluate that
-##     combination (which automatically carries the delta-method SE
-##     through any vcov override the user supplied).
+##     of average predictions.  For lm / glm / svyglm the per-vertex
+##     averages and their gradients w.r.t. the coefficients are computed
+##     analytically here (exact delta method).  For every other class the
+##     per-vertex averages and their joint variance-covariance come from
+##     marginaleffects::avg_predictions(by = ".__vertex"), and the signed
+##     combination is then formed by hand so the cross-partial scaling
+##     1/(2h)^k and any user vcov override propagate exactly.
 ##   * For per-observation effects (obseff = TRUE), point estimates are
 ##     formed from a single predictions() call without the delta method.
 ##
-## Because all heavy lifting -- factor handling, predict adapters for
-## hundreds of model classes, weights, robust/cluster SEs, multi-equation
-## models, etc. -- happens inside marginaleffects, this file is short
-## and the supported model space is whatever marginaleffects supports.
+## Because the heavy lifting for the fallback classes -- predict adapters
+## for hundreds of model classes, weights, robust/cluster SEs,
+## multi-equation models, etc. -- happens inside marginaleffects, the
+## supported model space is whatever marginaleffects supports.
+##
+## marginaleffects compatibility notes (tested on 0.32.0 and 1.0.0):
+##   * 1.0.0 drops the `by` column from avg_predictions() output for
+##     multi-outcome models (polr, multinom, ...) whenever it pads
+##     `newdata` for absent factor levels -- exactly what a factor x
+##     factor grid looks like.  .ginteff_complete_levels() sidesteps the
+##     padding by supplying the absent levels itself.
+##   * 1.0.0 changed vcov = "stata" from HC2 to HC1 and now aligns
+##     user-supplied vcov matrices by coefficient name (older versions
+##     matched positionally).  .ginteff_me_vcov_arg() makes both
+##     behaviours version-independent.
+##   * 1.0.0's numerical Jacobian is accurate enough that the fallback
+##     can use per-variable derivative steps like the analytic engine;
+##     older versions keep the shared max(sd) step.
 
 # =====================================================================
 # Public entry point
@@ -48,11 +65,20 @@
 #' @param type       Prediction scale, passed to marginaleffects::predictions
 #'                   (e.g. "response", "link"). Defaults to the model's
 #'                   marginaleffects default.
-#' @param vcov       Variance-covariance specification (e.g. TRUE, "HC3",
-#'                   "robust", ~cluster, or a matrix). Strings and formulas
-#'                   are resolved through the sandwich package on the
-#'                   analytic path and passed straight to marginaleffects on
-#'                   the fallback path.
+#' @param vcov       Variance-covariance specification: `TRUE` (the
+#'                   model's own), a sandwich string (`"HC0"`...`"HC5"`,
+#'                   `"robust"` = HC3, `"stata"` = HC1,
+#'                   `"classical"`/`"iid"` = model vcov), a one-sided
+#'                   `~cluster` formula, or a coefficient vcov matrix.
+#'                   Strings and formulas are resolved through the sandwich
+#'                   package on the analytic path and passed to
+#'                   marginaleffects on the fallback path, with the same
+#'                   alias meanings on both engines (marginaleffects itself
+#'                   mapped `"stata"` to HC2 before version 1.0.0). A matrix
+#'                   should carry coefficient names and cover every
+#'                   parameter marginaleffects reports for the model -- for
+#'                   `polr` that includes the threshold parameters -- and is
+#'                   aligned by name. `vcov = FALSE` is not supported.
 #' @param weights    Observation weights for the average. The default
 #'                   (`NULL`) uses the model's own estimation weights when
 #'                   it has any -- `svyglm` design weights, `lm`/`glm` prior
@@ -68,12 +94,13 @@
 #'                   (continuous variables only). Default: each variable
 #'                   gets its own step proportional to its standard
 #'                   deviation (1e-4 sd for one continuous variable, 0.01 sd
-#'                   for two, 0.05 sd for three) on the analytic engine; the
-#'                   marginaleffects fallback uses a single shared step
-#'                   scaled by the largest sd (tuned to stay above that
-#'                   engine's numerical-Jacobian noise floor). Supply a
-#'                   scalar to use one step for all variables, or a named
-#'                   vector for per-variable steps.
+#'                   for two, 0.05 sd for three) on the analytic engine and,
+#'                   with marginaleffects >= 1.0.0, on the fallback engine
+#'                   too. With older marginaleffects versions the fallback
+#'                   uses a single shared step scaled by the largest sd
+#'                   (tuned to stay above that engine's numerical-Jacobian
+#'                   noise floor). Supply a scalar to use one step for all
+#'                   variables, or a named vector for per-variable steps.
 #' @param eqn        Outcome / equation selector for multi-outcome models
 #'                   (e.g. polr, multinom). Passed to marginaleffects via
 #'                   the `type` argument or by post-filtering, depending on
@@ -121,6 +148,11 @@ ginteff <- function(model,
 
     cl <- match.call()
     .ginteff_check_marginaleffects()
+
+    if (isFALSE(vcov))
+        stop("`vcov = FALSE` is not supported: ginteff() always computes ",
+             "delta-method standard errors. Use `vcov = TRUE` (the ",
+             "default) or another vcov specification.", call. = FALSE)
 
     ## Default `type` to match Stata's `margins`/`ginteff` behaviour
     ## (per-observation inverse-link, then average). For glm/svyglm/lm
@@ -236,18 +268,19 @@ ginteff <- function(model,
     ## interacted variables live on very different scales, which destroys
     ## the local derivative (the pre-0.2.0 behaviour).
     ##
-    ## On the marginaleffects fallback the shared max(sd) step is kept:
-    ## that engine computes the prediction Jacobian numerically with an
-    ## internal step ~1e-7--1e-8, and c'V_ap c relies on differences
-    ## across vertices that must stay above that noise floor (the noise
-    ## is amplified by the (2h)^(-2k) divisor). The larger k defaults
-    ## exist for the same reason. Bias from finite differencing is
-    ## O(h^2); at h=0.05*sd the AIE drift on a smooth response is <0.01%.
-    ##
-    ## A residual quirk: for k=3 on the fallback the SE tends to sit
-    ## ~10% below Stata's analytic answer -- an FD artifact in c'V_ap c.
-    ## For analytical-quality 3-way SEs prefer `firstdiff = ` (the FD
-    ## variance is exact; no h-divisor amplifies the noise).
+    ## On the marginaleffects fallback the step policy depends on the
+    ## marginaleffects version.  Before 1.0.0 that engine computed the
+    ## prediction Jacobian numerically with an internal step ~1e-7--1e-8,
+    ## and c'V_ap c relies on differences across vertices that must stay
+    ## above that noise floor (the noise is amplified by the (2h)^(-2k)
+    ## divisor); the shared max(sd) step was tuned for it, and even so
+    ## the k=3 SE sat ~10-20% off the exact answer. From 1.0.0 the
+    ## Jacobian is accurate enough (forced-fallback SEs within ~1% of
+    ## the analytic engine for k=2 and k=3, either step policy) that the
+    ## per-variable steps are used there as well. Bias from finite
+    ## differencing is O(h^2); at h=0.05*sd the AIE drift on a smooth
+    ## response is <0.01%.  With an old marginaleffects, prefer
+    ## `firstdiff = ` for 3-way effects (its variance is exact).
     cont_dydxs <- dydxs_v[!is_fac[dydxs_v]]
     h <- .ginteff_resolve_h(h, cont_dydxs, data, engine)
 
@@ -568,29 +601,55 @@ ginteff <- function(model,
                                     type, weights, level, eqn,
                                     base_n, ...) {
 
-    wts_rep <- .ginteff_resolve_wts(weights, NULL,
-                                    nvert = length(unique(cf[[".__vertex"]])),
+    nvert   <- length(unique(cf[[".__vertex"]]))
+    wts_rep <- .ginteff_resolve_wts(weights, NULL, nvert = nvert,
                                     base_n = base_n)
+
+    ## Supply absent factor levels ourselves (tagged .__vertex = 0) so
+    ## marginaleffects never pads `newdata`; see .ginteff_complete_levels().
+    comp <- .ginteff_complete_levels(cf)
+    cf   <- comp$data
+    if (comp$n_extra > 0L && !is.null(wts_rep))
+        wts_rep <- c(wts_rep, rep(1, comp$n_extra))
+
     ap_args <- list(
         model,
         newdata    = cf,
         by         = ".__vertex",
-        vcov       = vcov_arg,
+        vcov       = .ginteff_me_vcov_arg(vcov_arg, model),
         type       = type,
         conf_level = level,
         ...)
     if (!is.null(wts_rep)) ap_args$wts <- wts_rep
     ap <- do.call(marginaleffects::avg_predictions, ap_args)
 
-    keep <- .ginteff_filter_eqn(ap, eqn)
-    if (!is.null(keep)) ap <- ap[keep, , drop = FALSE]
+    if (is.null(ap[[".__vertex"]]))
+        stop("marginaleffects::avg_predictions() did not return the ",
+             "'.__vertex' grouping column, so the per-vertex averages ",
+             "cannot be recovered (marginaleffects ",
+             as.character(utils::packageVersion("marginaleffects")), ", ",
+             paste(class(model), collapse = "/"), " model).",
+             call. = FALSE)
 
-    ord    <- order(ap$.__vertex)
-    est    <- as.numeric(ap$estimate[ord])
+    ## Per-vertex vcov *before* any subsetting: `[` on a predictions
+    ## object does not reliably carry the attribute along.
     V_full <- stats::vcov(ap)
-    if (!is.null(keep) && nrow(V_full) != length(ord))
-        V_full <- V_full[keep, keep, drop = FALSE]
-    V_ap   <- V_full[ord, ord, drop = FALSE]
+    if (!is.matrix(V_full) || !all(dim(V_full) == nrow(ap)))
+        stop("Could not recover the per-vertex variance-covariance ",
+             "matrix from marginaleffects::avg_predictions().",
+             call. = FALSE)
+
+    idx  <- which(ap[[".__vertex"]] %in% seq_len(nvert))
+    keep <- .ginteff_filter_eqn(ap, eqn)
+    if (!is.null(keep)) idx <- intersect(idx, keep)
+    if (length(idx) != nvert)
+        stop("Expected ", nvert, " per-vertex averages from ",
+             "marginaleffects::avg_predictions() but found ", length(idx),
+             ".", call. = FALSE)
+    ord <- idx[order(ap[[".__vertex"]][idx])]
+
+    est   <- as.numeric(ap$estimate[ord])
+    V_ap  <- V_full[ord, ord, drop = FALSE]
 
     c_vec  <- as.numeric(signs)
     L      <- as.numeric(crossprod(c_vec, est)) * scale
@@ -606,10 +665,105 @@ ginteff <- function(model,
         p        = if (seL > 0) 2 * stats::pnorm(-abs(L / seL)) else NA_real_,
         lower    = L - zq * seL,
         upper    = L + zq * seL,
-        ap       = ap,
+        ap       = ap[ord, , drop = FALSE],
         obs      = NULL,
         keep     = NULL
     )
+}
+
+# =====================================================================
+# Internal: complete absent factor levels in the stacked grid.
+#
+# marginaleffects pads `newdata` with one row per level of every factor
+# column that does not show all of its levels, predicts on the padded
+# frame, and drops the padding afterwards.  In marginaleffects 1.0.0
+# the step that re-attaches non-model columns (our `.__vertex`) to the
+# predictions is skipped when the model returns several rows per
+# observation (polr, multinom, ...) *and* padding took place -- the
+# padding rows share one rowid, which trips the duplicate check in
+# merge_original_data().  A factor x factor grid always triggers this
+# because each vertex holds the interacted factors at a single level.
+#
+# Supplying the absent levels ourselves -- one copy of the first row per
+# missing level, tagged `.__vertex = 0` -- means nothing is missing from
+# marginaleffects' point of view, so it does not pad.  The extra rows
+# form their own `by` group, which the caller discards; they cannot
+# touch the real per-vertex averages or their covariances.  The 100-level
+# ceiling mirrors marginaleffects' own (it skips padding above it).
+# =====================================================================
+
+.ginteff_complete_levels <- function(cf) {
+    extra <- list()
+    total <- 0L
+    for (v in names(cf)) {
+        x <- cf[[v]]
+        if (!is.factor(x)) next
+        lv   <- levels(x)
+        miss <- setdiff(lv, as.character(unique(x)))
+        if (!length(miss)) next
+        total <- total + length(lv)
+        rows  <- cf[rep(1L, length(miss)), , drop = FALSE]
+        rows[[v]] <- factor(miss, levels = lv, ordered = is.ordered(x))
+        extra[[v]] <- rows
+    }
+    if (!length(extra) || total > 100L)
+        return(list(data = cf, n_extra = 0L))
+    extra <- do.call(rbind, extra)
+    extra[[".__vertex"]] <- 0L
+    out <- rbind(cf, extra)
+    rownames(out) <- NULL
+    list(data = out, n_extra = nrow(extra))
+}
+
+# =====================================================================
+# Internal: normalise a `vcov` argument for marginaleffects.
+#
+# * "stata" -> "HC1" so the alias means the same thing on both engines
+#   and across marginaleffects versions (marginaleffects mapped it to
+#   HC2 before 1.0.0).  "classical"/"iid"/"constant" -> TRUE.
+# * A named matrix is reordered to marginaleffects' own coefficient
+#   order (get_coef()), which for polr puts the thresholds first and
+#   therefore differs from rownames(vcov(model)).  marginaleffects >= 1.0.0
+#   aligns by name itself; older versions matched positionally and
+#   silently produced wrong standard errors for such a matrix.
+# =====================================================================
+
+.ginteff_me_vcov_arg <- function(vcov_arg, model) {
+    if (is.character(vcov_arg) && length(vcov_arg) == 1L) {
+        key <- tolower(vcov_arg)
+        if (key == "stata") return("HC1")
+        if (key %in% c("classical", "constant", "iid")) return(TRUE)
+        return(vcov_arg)
+    }
+    if (is.matrix(vcov_arg)) {
+        nm <- tryCatch(names(marginaleffects::get_coef(model)),
+                       error = function(e) NULL)
+        rn <- rownames(vcov_arg)
+        cn <- colnames(vcov_arg)
+        if (is.null(rn) || is.null(cn)) {
+            if (!.ginteff_me_version_ge("1.0.0"))
+                warning("`vcov` is an unnamed matrix and will be matched ",
+                        "positionally against marginaleffects' coefficient ",
+                        "order",
+                        if (!is.null(nm))
+                            paste0(" (", paste(nm, collapse = ", "), ")"),
+                        ". Supply dimnames to have it aligned by name.",
+                        call. = FALSE)
+        } else if (!is.null(nm) && all(nm %in% rn) && all(nm %in% cn)) {
+            vcov_arg <- vcov_arg[nm, nm, drop = FALSE]
+        }
+    }
+    vcov_arg
+}
+
+# =====================================================================
+# Internal: installed marginaleffects version >= `v`?
+# =====================================================================
+
+.ginteff_me_version_ge <- function(v) {
+    ver <- tryCatch(utils::packageVersion("marginaleffects"),
+                    error = function(e) NULL)
+    !is.null(ver) && ver >= v
 }
 
 # =====================================================================
@@ -645,8 +799,9 @@ ginteff <- function(model,
 #
 # Returns a named numeric vector over the continuous dydxs variables.
 # Defaults scale each variable's step by its own sd on the analytic
-# engine; the marginaleffects fallback keeps the legacy shared
-# max(sd) step (tuned to its numerical-Jacobian noise floor).
+# engine and on the marginaleffects fallback from marginaleffects 1.0.0;
+# older marginaleffects versions keep the legacy shared max(sd) step
+# (tuned to their numerical-Jacobian noise floor).
 # =====================================================================
 
 .ginteff_resolve_h <- function(h, cont_dydxs, data, engine) {
@@ -678,7 +833,7 @@ ginteff <- function(model,
                   `1` = 1e-4,
                   `2` = 0.01,
                   `3` = 0.05)
-    if (identical(engine, "analytic"))
+    if (identical(engine, "analytic") || .ginteff_me_version_ge("1.0.0"))
         stats::setNames(c_k * sds, cont_dydxs)
     else
         stats::setNames(rep(c_k * max(sds), k_cont), cont_dydxs)

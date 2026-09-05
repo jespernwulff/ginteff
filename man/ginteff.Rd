@@ -54,11 +54,20 @@ variables (default: 1 each). May also be a single scalar.}
 (e.g. "response", "link"). Defaults to the model's
 marginaleffects default.}
 
-\item{vcov}{Variance-covariance specification (e.g. TRUE, "HC3",
-"robust", ~cluster, or a matrix). Strings and formulas
-are resolved through the sandwich package on the
-analytic path and passed straight to marginaleffects on
-the fallback path.}
+\item{vcov}{Variance-covariance specification: \code{TRUE} (the
+model's own), a sandwich string (\code{"HC0"}...\code{"HC5"},
+\code{"robust"} = HC3, \code{"stata"} = HC1,
+\code{"classical"}/\code{"iid"} = model vcov), a one-sided
+\code{~cluster} formula, or a coefficient vcov matrix.
+Strings and formulas are resolved through the sandwich
+package on the analytic path and passed to
+marginaleffects on the fallback path, with the same
+alias meanings on both engines (marginaleffects itself
+mapped \code{"stata"} to HC2 before version 1.0.0). A matrix
+should carry coefficient names and cover every
+parameter marginaleffects reports for the model -- for
+\code{polr} that includes the threshold parameters -- and is
+aligned by name. \code{vcov = FALSE} is not supported.}
 
 \item{weights}{Observation weights for the average. The default
 (\code{NULL}) uses the model's own estimation weights when
@@ -78,12 +87,13 @@ in the data.}
 (continuous variables only). Default: each variable
 gets its own step proportional to its standard
 deviation (1e-4 sd for one continuous variable, 0.01 sd
-for two, 0.05 sd for three) on the analytic engine; the
-marginaleffects fallback uses a single shared step
-scaled by the largest sd (tuned to stay above that
-engine's numerical-Jacobian noise floor). Supply a
-scalar to use one step for all variables, or a named
-vector for per-variable steps.}
+for two, 0.05 sd for three) on the analytic engine and,
+with marginaleffects >= 1.0.0, on the fallback engine
+too. With older marginaleffects versions the fallback
+uses a single shared step scaled by the largest sd
+(tuned to stay above that engine's numerical-Jacobian
+noise floor). Supply a scalar to use one step for all
+variables, or a named vector for per-variable steps.}
 
 \item{eqn}{Outcome / equation selector for multi-outcome models
 (e.g. polr, multinom). Passed to marginaleffects via

@@ -118,8 +118,11 @@ probability we are differentiating; for `polr` it can be a label
 
 ## Robust standard errors
 
-`vcov` is forwarded straight to `marginaleffects::avg_predictions()`,
-so anything that package accepts works:
+`vcov` is resolved through `sandwich` on the analytic engine and
+forwarded to `marginaleffects::avg_predictions()` on the fallback
+engine, with the same alias meanings on both (`"robust"` = HC3,
+`"stata"` = HC1, `"classical"` / `"iid"` = the model's own vcov), so
+anything either package accepts works:
 
 ```{r robust, eval = requireNamespace("sandwich", quietly = TRUE)}
 ginteff(m2, dydxs = c("age", "height", "weight"), vcov = "HC3")
@@ -180,11 +183,15 @@ as.data.frame(ginteff(m2, firstdiff = c("age", "height", "weight"),
   gets its own derivative step scaled by its own sd, so differently
   scaled variables are safe.
 * **other model classes (the `marginaleffects` fallback: `polr`,
-  `multinom`, ...)**: prefer `firstdiff` for three-way effects. The
-  numerical cross-partial in `dydxs` involves the finite-difference
-  quotient `(2h)^{-3}`, which amplifies noise in `marginaleffects`'s
-  internally computed prediction Jacobian; in testing the resulting SE
-  comes out ~10 % low. The `firstdiff` SE is exact regardless of `h`.
+  `multinom`, ...)**: with marginaleffects >= 1.0.0 either path is
+  accurate as well -- that release's prediction Jacobian is precise
+  enough that the `dydxs` SE lands within ~1 % of the exact answer, and
+  each continuous variable again gets its own derivative step. With an
+  older marginaleffects, prefer `firstdiff` for three-way effects: the
+  finite-difference quotient `(2h)^{-3}` amplifies noise in that
+  version's numerically computed Jacobian and the resulting SE comes
+  out ~10-20 % off, whereas the `firstdiff` SE is exact regardless of
+  `h`.
 
 ## Argument map vs Stata
 

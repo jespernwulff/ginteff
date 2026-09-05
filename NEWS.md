@@ -1,3 +1,53 @@
+# ginteff 0.2.1
+
+## marginaleffects 1.0.0 compatibility
+
+* **Factor x factor interactions on the fallback engine work again with
+  marginaleffects 1.0.0.** That release skips re-attaching non-model
+  columns to `avg_predictions()` output when a multi-outcome model
+  (`polr`, `multinom`, ...) meets factor-level padding of `newdata` --
+  which every factor x factor grid triggers, because each vertex holds
+  the interacted factors at a single level. The `by` grouping was then
+  silently ignored and `ginteff()` stopped with
+  `argument 1 is not a vector`. The fallback engine now supplies the
+  absent factor levels itself (a handful of extra rows in their own,
+  discarded group), so marginaleffects never pads. Results are
+  unchanged on marginaleffects 0.32.0 and match the Stata reference
+  values on 1.0.0.
+
+* **`vcov = "stata"` means HC1 on both engines and on every
+  marginaleffects version.** marginaleffects 1.0.0 changed its own
+  `"stata"` alias from HC2 to HC1 (Stata's `vce(robust)`); `ginteff()`
+  now maps the string itself before calling marginaleffects.
+  `"classical"` / `"iid"` / `"constant"` are accepted on the fallback
+  engine as well.
+
+* **User-supplied vcov matrices are aligned by coefficient name on the
+  fallback engine.** marginaleffects orders `polr` parameters
+  thresholds-first, unlike `vcov(model)`; before 1.0.0 it matched a
+  full named matrix positionally and returned a wildly wrong SE (0.0219
+  instead of 0.00018 in the new TM9 test). 1.0.0 aligns by name and
+  requires the matrix to cover *all* parameters it reports (for `polr`
+  including the thresholds); `ginteff()` now aligns by name on every
+  version and warns about unnamed matrices on older ones.
+
+* **Per-variable derivative steps on the fallback engine with
+  marginaleffects >= 1.0.0.** The 0.2.0 scaling fix was limited to the
+  analytic engine because the fallback's numerical Jacobian was too
+  noisy for it. marginaleffects 1.0.0's Jacobian is accurate enough --
+  forcing a `glm` through the fallback reproduces the analytic engine's
+  SE to within 1% for two- and three-way cross-partials, versus 20-40%
+  off with 0.32.0 -- so the fallback now uses the same per-variable
+  steps; older marginaleffects versions keep the shared `max(sd)` step.
+  As a by-product, fallback SEs on continuous x factor `polr` /
+  `multinom` effects now land within 0.05% of Stata's (1-3% before).
+
+* `vcov = FALSE` stops with a clear message instead of a marginaleffects
+  error about a Jacobian mismatch.
+
+* New tests TM9-TM12 cover the four points above. The suite (73
+  expectations) passes on marginaleffects 0.32.0 and 1.0.0 (R 4.2.1).
+
 # ginteff 0.2.0
 
 ## Bug fixes
