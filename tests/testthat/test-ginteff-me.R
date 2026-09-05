@@ -14,7 +14,9 @@
 ##     Stata to 4-5 sig figs in every case.
 ##   * SEs are pinned with a wider tolerance per case, reflecting the
 ##     known finite-difference / Hessian-conditioning effects
-##     documented in CLAUDE.md (2026-05-06 entry).
+##     documented in CLAUDE.md (2026-05-06 entry).  With marginaleffects
+##     >= 1.0.0 the continuous x factor SEs land within 0.05% of Stata;
+##     the wider tolerances keep the suite green on older versions.
 
 skip_unless_me <- function() {
     skip_if_not_installed("marginaleffects")
@@ -47,7 +49,8 @@ test_that("polr (logit), age x female: AIE matches Stata; SE within 5%", {
                     data = dat, Hess = TRUE)
     g <- ginteff(m, dydxs = c("age", "female_f"), eqn = 2L)
     expect_equal(unname(g$aie),  -0.00028479, tolerance = 1e-4)
-    ## SE drift is the marginaleffects FD-cross-partial step (~3% high)
+    ## SE drift is the marginaleffects FD-cross-partial step (~3% high
+    ## on marginaleffects < 1.0.0; 0.04% from 1.0.0)
     expect_equal(unname(g$se),    0.00018072, tolerance = 0.05)
 })
 
